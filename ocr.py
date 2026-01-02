@@ -1,9 +1,7 @@
 import os
 import re
 import json
-import glob
 import cv2
-import numpy as np
 import easyocr
 from difflib import SequenceMatcher
 from collections import Counter
@@ -11,21 +9,14 @@ from collections import Counter
 # =========================
 # ⚙️ 설정 (상수)
 # =========================
-
-# 영상/프레임 설정 (preprocess.py 로직에 맞춤: 1초에 약 2장)
 EXTRACT_FPS = 2.0    
-FRAME_STEP = 1       # 모든 프레임 분석
-
-# EasyOCR 설정
+FRAME_STEP = 1       
 USE_GPU = True 
 LANG_LIST = ['ko', 'en']
 
-# ROI 좌표 설정 (비율 0.0 ~ 1.0)
-# A) 메인: 좌하단 이름표
+# ROI 좌표 설정
 ROI_MAIN_X0, ROI_MAIN_Y0 = 0.00, 0.92
 ROI_MAIN_X1, ROI_MAIN_Y1 = 0.35, 0.99
-
-# B) 서브: 우측 사이드 패널
 ROI_SIDE_X0, ROI_SIDE_Y0 = 0.75, 0.58
 ROI_SIDE_X1, ROI_SIDE_Y1 = 0.85, 0.63
 
@@ -65,10 +56,8 @@ def clean_name(t: str) -> str:
     t = (t or "").strip()
     t = re.sub(r"[^0-9A-Za-z가-힣\s]", "", t).strip()
     t = _collapse_korean_spaces(t)
-    
     if len(t) < 2 or len(t) > 40: return ""
     if re.search(r"(.)\1\1\1", t): return ""
-    
     bad = {"발표", "발표중", "화면", "공유", "자막", "미트", "meet", "google", "구글", "프레젠테이션"}
     if t.lower() in bad: return ""
     return t
@@ -77,10 +66,8 @@ def crop_roi(img, x0_r, y0_r, x1_r, y1_r):
     h, w = img.shape[:2]
     x0 = int(w * x0_r); x1 = int(w * x1_r)
     y0 = int(h * y0_r); y1 = int(h * y1_r)
-    
     x0 = max(0, x0); y0 = max(0, y0)
     x1 = min(w, x1); y1 = min(h, y1)
-    
     if x1 <= x0 or y1 <= y0: return None
     return img[y0:y1, x0:x1]
 
@@ -97,56 +84,38 @@ def run_ocr_detection(reader, img):
         results = reader.readtext(img, detail=1)
     except:
         return "", 0.0
-
     best_text = ""
     best_conf = 0.0
-
     if not results: return "", 0.0
-
     for (bbox, text, conf) in results:
         if conf < MIN_CONF: continue
         cleaned = clean_name(text)
         if not cleaned: continue
-        
         if conf > best_conf:
             best_conf = conf
             best_text = cleaned
-            
     return best_text, best_conf
 
 # =========================
-# 🚀 [핵심] 외부 호출용 메인 함수
+# 🚀 [수정됨] 인자를 2개 받도록 변경
 # =========================
-def run_ocr_on_folder(frame_dir):
+def run_ocr_on_folder(frame_dir, output_dir):
     """
-    main.py에서 호출하는 진입점 함수.
-    frame_dir: 이미지가 저장된 폴더 경로 (예: .../data/frame/test1)
+    frame_dir: 이미지가 있는 폴더
+    output_dir: 결과 json을 저장할 폴더 (main.py에서 받아옴)
     """
-    
     # 1. 경로 검증
     if not frame_dir or not os.path.exists(frame_dir):
-        print(f"❌ OCR 에러: 경로가 존재하지 않습니다 -> {frame_dir}")
+        print(f"❌ OCR 에러: 경로가 없습니다 -> {frame_dir}")
         return
 
-    # 2. 결과 저장 경로 자동 생성
-    # 예: .../data/frame/test1 -> .../data/output/test1
-    parent_dir = os.path.dirname(frame_dir)  # .../data/frame
-    base_name = os.path.basename(frame_dir)  # test1
-    
-    # 'frame' 폴더의 형제 폴더인 'output' 폴더를 타겟으로 설정
-    if "frame" in parent_dir:
-        output_root = parent_dir.replace("frame", "output")
-    else:
-        output_root = os.path.join(parent_dir, "../output") # fallback
-        
-    output_dir = os.path.join(output_root, base_name)
+    # [중요] output_dir을 받아서 폴더 생성
     os.makedirs(output_dir, exist_ok=True)
 
-    print(f"▶ EasyOCR 모델 로딩 중... (GPU={USE_GPU})")
+    print(f"▶ EasyOCR 분석 시작... (GPU={USE_GPU})")
     reader = easyocr.Reader(LANG_LIST, gpu=USE_GPU)
-    print("✅ 모델 로딩 완료!")
-
-    # 3. 이미지 파일 리스트업
+    
+    # 이미지 파일 리스트업
     image_files = sorted([
         f for f in os.listdir(frame_dir) 
         if f.lower().endswith(('.png', '.jpg', '.jpeg'))
@@ -156,7 +125,7 @@ def run_ocr_on_folder(frame_dir):
         print("❌ 분석할 이미지가 없습니다.")
         return
 
-    print(f"✅ 총 {len(image_files)}개의 프레임 분석 시작 (폴더: {base_name})")
+    print(f"✅ 총 {len(image_files)}개의 프레임 분석 시작")
 
     name_votes = Counter()
     segments = []
@@ -164,7 +133,6 @@ def run_ocr_on_folder(frame_dir):
     cur_start = None
     cur_last = None
 
-    # 4. 루프 시작
     for i, fname in enumerate(image_files):
         if i % FRAME_STEP != 0: continue
             
@@ -172,21 +140,17 @@ def run_ocr_on_folder(frame_dir):
         frame = cv2.imread(path)
         if frame is None: continue
 
-        # 타임스탬프 계산 (추출 시 FPS 기반)
         t_sec = i / EXTRACT_FPS
 
         # --- OCR Logic ---
-        # 1) Main ROI
         crop_main = crop_roi(frame, ROI_MAIN_X0, ROI_MAIN_Y0, ROI_MAIN_X1, ROI_MAIN_Y1)
         img_main = preprocess_image(crop_main, UPSCALE_MAIN)
         name_main, conf_main = run_ocr_detection(reader, img_main)
         
-        # 2) Side ROI
         crop_side = crop_roi(frame, ROI_SIDE_X0, ROI_SIDE_Y0, ROI_SIDE_X1, ROI_SIDE_Y1)
         img_side = preprocess_image(crop_side, UPSCALE_SIDE)
         name_side, conf_side = run_ocr_detection(reader, img_side)
         
-        # 3) Decision
         final_name = ""
         final_conf = 0.0
         source = "" 
@@ -206,13 +170,13 @@ def run_ocr_on_folder(frame_dir):
         if not RECORD_UNKNOWN and final_name == UNKNOWN_LABEL:
             final_name = ""
 
-        # 진행 상황 로그 (50장마다)
+        # 로그 (50장마다)
         if i % 50 == 0:
             print(f"[{i}/{len(image_files)}] {sec_to_mmss(t_sec)} | {final_name} ({source})")
 
         if not final_name: continue
 
-        # --- 투표 및 세그먼트 로직 ---
+        # 투표 및 세그먼트
         seg_name = UNKNOWN_LABEL
         if final_name != UNKNOWN_LABEL:
             merged = None
@@ -237,7 +201,6 @@ def run_ocr_on_folder(frame_dir):
                 })
                 cur_name = seg_name; cur_start = t_sec; cur_last = t_sec
 
-    # 루프 종료 후 마지막 세그먼트 처리
     if cur_name is not None:
         segments.append({
             "name": cur_name,
@@ -245,10 +208,11 @@ def run_ocr_on_folder(frame_dir):
             "last_seen": sec_to_mmss(cur_last)
         })
 
-    # 5. JSON 저장
+    # [수정됨] 저장 로직: 인자로 받은 output_dir 사용
     out_json = os.path.join(output_dir, "result.json")
+    
     result_data = {
-        "video_name": base_name,
+        "video_name": os.path.basename(frame_dir),
         "total_frames": len(image_files),
         "segments": segments,
         "votes_ranking": name_votes.most_common()
@@ -257,15 +221,10 @@ def run_ocr_on_folder(frame_dir):
     with open(out_json, "w", encoding="utf-8") as f:
         json.dump(result_data, f, ensure_ascii=False, indent=2)
 
-    print("\n" + "="*30)
-    print(f"🎉 OCR 분석 완료!")
-    print(f"📄 결과 파일: {out_json}")
-    print("="*30)
+    print(f"✅ OCR 분석 완료! JSON 저장됨: {out_json}")
 
-# =========================
-# 독립 실행 시 (테스트 용)
-# =========================
+# 테스트 실행 시
 if __name__ == "__main__":
-    # 테스트할 폴더 경로를 여기에 넣어서 직접 실행 가능
-    TEST_DIR = "/home/jms888/workspace2/tobigs/multimodal/data/frame/test1"
-    run_ocr_on_folder(TEST_DIR)
+    TEST_FRAME_DIR = "data/frame/test1"
+    TEST_OUTPUT_DIR = "data/output/test1"
+    run_ocr_on_folder(TEST_FRAME_DIR, TEST_OUTPUT_DIR)
